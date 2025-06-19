@@ -1,0 +1,194 @@
+//===----------------------------------------------------------------------===//
+//
+//                         BusTub
+//
+// lock_manager.cpp
+//
+// Identification: src/concurrency/lock_manager.cpp
+//
+// Copyright (c) 2015-2019, Carnegie Mellon University Database Group
+//
+//===----------------------------------------------------------------------===//
+
+#include "concurrency/lock_manager.h"
+
+#include "common/config.h"
+#include "concurrency/transaction.h"
+#include "concurrency/transaction_manager.h"
+
+namespace bustub {
+
+auto LockManager::LockTable(Transaction *txn, LockMode lock_mode, const table_oid_t &oid) -> bool {
+  // part1
+  if (txn->GetIsolationLevel() == IsolationLevel::READ_UNCOMMITTED) {
+    if (lock_mode == LockMode::SHARED || lock_mode == LockMode::INTENTION_SHARED ||
+        lock_mode == LockMode::SHARED_INTENTION_EXCLUSIVE) {
+      txn->SetState(TransactionState::ABORTED);
+      throw TransactionAbortException(txn->GetTransactionId(), AbortReason::LOCK_SHARED_ON_READ_UNCOMMITTED);
+      return false;
+    }
+  }
+
+  if (txn->GetState() == TransactionState::SHRINKING) {
+    if (txn->GetIsolationLevel() == IsolationLevel::READ_COMMITTED) {
+      if (lock_mode != LockMode::SHARED && lock_mode != LockMode::INTENTION_SHARED) {
+        txn->SetState(TransactionState::ABORTED);
+        throw TransactionAbortException(txn->GetTransactionId(), AbortReason::LOCK_ON_SHRINKING);
+        return false;
+      }
+    }
+    if (txn->GetIsolationLevel() == IsolationLevel::REPEATABLE_READ) {
+      txn->SetState(TransactionState::ABORTED);
+      throw TransactionAbortException(txn->GetTransactionId(), AbortReason::LOCK_ON_SHRINKING);
+      return false;
+    }
+    if (txn->GetIsolationLevel() == IsolationLevel::READ_UNCOMMITTED) {
+      txn->SetState(TransactionState::ABORTED);
+      throw TransactionAbortException(txn->GetTransactionId(), AbortReason::LOCK_ON_SHRINKING);
+      return false;
+    }
+  }
+
+  // part2
+  LockMode txn_lockmode;
+  bool already_lock = false;
+  if (txn->IsTableExclusiveLocked(oid)) {
+    already_lock = true;
+    txn_lockmode = LockMode::EXCLUSIVE;
+  } else if (txn->IsTableIntentionExclusiveLocked(oid)) {
+    already_lock = true;
+    txn_lockmode = LockMode::INTENTION_EXCLUSIVE;
+  } else if (txn->IsTableIntentionSharedLocked(oid)) {
+    already_lock = true;
+    txn_lockmode = LockMode::INTENTION_SHARED;
+  } else if (txn->IsTableSharedIntentionExclusiveLocked(oid)) {
+    already_lock = true;
+    txn_lockmode = LockMode::SHARED_INTENTION_EXCLUSIVE;
+  } else if (txn->IsTableSharedLocked(oid)) {
+    already_lock = true;
+    txn_lockmode = LockMode::SHARED;
+  }
+
+  // part3
+  if (already_lock) {
+    if (txn_lockmode == lock_mode) {
+      return true;
+    } else if (txn_lockmode == LockMode::SHARED &&
+               (lock_mode != LockMode::EXCLUSIVE && lock_mode != LockMode::SHARED_INTENTION_EXCLUSIVE)) {
+      throw TransactionAbortException(txn->GetTransactionId(), AbortReason::INCOMPATIBLE_UPGRADE);
+      return false;
+    } else if (txn_lockmode == LockMode::INTENTION_EXCLUSIVE &&
+               (lock_mode != LockMode::EXCLUSIVE && lock_mode != LockMode::SHARED_INTENTION_EXCLUSIVE)) {
+      txn->SetState(TransactionState::ABORTED);
+      throw TransactionAbortException(txn->GetTransactionId(), AbortReason::INCOMPATIBLE_UPGRADE);
+      return false;
+    } else if (txn_lockmode == LockMode::SHARED_INTENTION_EXCLUSIVE && lock_mode != LockMode::EXCLUSIVE) {
+      txn->SetState(TransactionState::ABORTED);
+      throw TransactionAbortException(txn->GetTransactionId(), AbortReason::INCOMPATIBLE_UPGRADE);
+      return false;
+    } else if (txn_lockmode == LockMode::EXCLUSIVE) {
+      txn->SetState(TransactionState::ABORTED);
+      throw TransactionAbortException(txn->GetTransactionId(), AbortReason::INCOMPATIBLE_UPGRADE);
+      return false;
+    }
+  }
+
+  // part4
+  std::unique_lock<std::mutex> lock(table_lock_map_latch_);
+  if (table_lock_map_.find(oid) == table_lock_map_.end()) {
+    table_lock_map_[oid] = std::make_shared<LockRequestQueue>();
+  }
+  std::shared_ptr<LockRequestQueue> lockrequest = table_lock_map_[oid];
+  lock.unlock();
+
+  // part5
+  std::unique_lock<std::mutex> queue_lock(lockrequest->latch_);
+  if (already_lock) {
+    if (lockrequest->upgrading_ != INVALID_TXN_ID) {
+      txn->SetState(TransactionState::ABORTED);
+      throw TransactionAbortException(txn->GetTransactionId(), AbortReason::UPGRADE_CONFLICT);
+    }
+    lockrequest->upgrading_ = txn->GetTransactionId();
+    auto it = lockrequest->request_queue_.begin();
+    while (it != lockrequest->request_queue_.end()) {
+      if ((*it)->txn_id_ == txn->GetTransactionId()) {
+        delete *it;
+        lockrequest->request_queue_.erase(it);
+        break;
+      } else {
+        it++;
+      }
+    }
+    RemoveTableLockFromTxn(txn, txn_lockmode, oid);
+  }
+  // part6
+  auto new_request = new LockRequest(txn->GetTransactionId(), lock_mode, oid);
+  if (already_lock) {
+    auto it = lockrequest->request_queue_.begin();
+    while (it != lockrequest->request_queue_.end() && (*it)->granted_) {
+      it++;
+    }
+    lockrequest->request_queue_.insert(it, new_request);
+  } else {
+    lockrequest->request_queue_.push_back(new_request);
+  }
+
+  // part7
+  while (!Grantlock(lockrequest->request_queue_, new_request)) {
+    lockrequest->cv_.wait(queue_lock);
+
+    if (txn->GetState() == TransactionState::ABORTED) {
+      auto it = std::find(lockrequest->request_queue_.begin(), lockrequest->request_queue_.end(), new_request);
+      if (it != lockrequest->request_queue_.end()) {
+        lockrequest->request_queue_.erase(it);
+        delete new_request;
+      }
+
+      if (already_lock) {
+        lockrequest->upgrading_ = INVALID_TXN_ID;
+      }
+      lockrequest->cv_.notify_all();
+      return false;
+    }
+  }
+  new_request->granted_ = true;
+  // part8
+  if (already_lock) {
+    lockrequest->upgrading_ = INVALID_TXN_ID;
+  }
+  // 将锁添加到事务的锁集合
+  AddTableLockToTxn(txn, lock_mode, oid);
+
+  // 唤醒其他等待的事务
+  lockrequest->cv_.notify_all();
+  return true;
+}
+
+auto LockManager::UnlockTable(Transaction *txn, const table_oid_t &oid) -> bool { return true; }
+
+auto LockManager::LockRow(Transaction *txn, LockMode lock_mode, const table_oid_t &oid, const RID &rid) -> bool {
+  return true;
+}
+
+auto LockManager::UnlockRow(Transaction *txn, const table_oid_t &oid, const RID &rid) -> bool { return true; }
+
+void LockManager::AddEdge(txn_id_t t1, txn_id_t t2) {}
+
+void LockManager::RemoveEdge(txn_id_t t1, txn_id_t t2) {}
+
+auto LockManager::HasCycle(txn_id_t *txn_id) -> bool { return false; }
+
+auto LockManager::GetEdgeList() -> std::vector<std::pair<txn_id_t, txn_id_t>> {
+  std::vector<std::pair<txn_id_t, txn_id_t>> edges(0);
+  return edges;
+}
+
+void LockManager::RunCycleDetection() {
+  while (enable_cycle_detection_) {
+    std::this_thread::sleep_for(cycle_detection_interval);
+    {  // TODO(students): detect deadlock
+    }
+  }
+}
+
+}  // namespace bustub
