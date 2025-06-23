@@ -260,6 +260,7 @@ auto LockManager::LockRow(Transaction *txn, LockMode lock_mode, const table_oid_
     if (requestqueue->upgrading_ != INVALID_TXN_ID) {
       txn->SetState(TransactionState::ABORTED);
       throw TransactionAbortException(txn->GetTransactionId(), AbortReason::UPGRADE_CONFLICT);
+      
     }
   }
 
