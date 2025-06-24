@@ -339,6 +339,25 @@ class LockManager {
     txn->UnlockTxn();
   }
 
+  auto RemoveRowLockFromTxn(Transaction *txn, LockMode lock_mode, const table_oid_t &oid, const RID &rid) -> void {
+    txn->LockTxn();
+    std::shared_ptr<std::unordered_map<table_oid_t, std::unordered_set<RID>>> row_lock_set;
+    switch (lock_mode) {
+      case LockMode::SHARED:
+        row_lock_set = txn->GetSharedRowLockSet();
+        break;
+      case LockMode::EXCLUSIVE:
+        row_lock_set = txn->GetExclusiveRowLockSet();
+        break;
+      default:
+        BUSTUB_ASSERT(false, "Invalid lock mode for row lock");
+        txn->UnlockTxn();
+        return;
+    }
+    (*row_lock_set)[oid].erase(rid);
+    txn->UnlockTxn();
+  }
+
   auto Grantlock(std::list<LockRequest *> &lockqueue, LockRequest *lockrequest) -> bool {
     for (auto &item : lockqueue) {
       if (item == lockrequest) {
@@ -355,9 +374,8 @@ class LockManager {
     for (auto &item : lockqueue) {
       if (!item->granted_ && AreLocksCompatible(item->lock_mode_, lockrequest->lock_mode_)) {
         item->granted_ = true;
-      } else (!item->granted_ && !AreLocksCompatible(item->lock_mode_, lockrequest->lock_mode_)){
-        break;
-      }
+      } else
+        (!item->granted_ && !AreLocksCompatible(item->lock_mode_, lockrequest->lock_mode_)) { break; }
     }
     return true;
   }
@@ -401,6 +419,24 @@ class LockManager {
         txn->GetSharedIntentionExclusiveTableLockSet()->insert(oid);
         break;
     }
+    txn->UnlockTxn();
+  }
+  void AddRowLockToTxn(Transaction *txn, LockMode mode, table_oid_t oid, RID rid) {
+    txn->LockTxn();
+    std::shared_ptr<std::unordered_map<table_oid_t, std::unordered_set<RID>>> row_lock_set;
+    switch (mode) {
+      case LockMode::SHARED:
+        row_lock_set = txn->GetSharedRowLockSet();
+        break;
+      case LockMode::EXCLUSIVE:
+        row_lock_set = txn->GetExclusiveRowLockSet();
+        break;
+      default:
+        BUSTUB_ASSERT(false, "Invaild lock mode for row lock");
+        txn->UnlockTxn();
+        return;
+    }
+    (*row_lock_set)[oid].insert(rid);
     txn->UnlockTxn();
   }
 };

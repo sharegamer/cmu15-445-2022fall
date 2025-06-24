@@ -255,15 +255,62 @@ auto LockManager::LockRow(Transaction *txn, LockMode lock_mode, const table_oid_
   row_lock.unlock();
 
   // part5
-
+  std::unique_lock<std::mutex> queue_lock(requestqueue->latch_);
   if (already_lock) {
     if (requestqueue->upgrading_ != INVALID_TXN_ID) {
       txn->SetState(TransactionState::ABORTED);
       throw TransactionAbortException(txn->GetTransactionId(), AbortReason::UPGRADE_CONFLICT);
+    }
+    requestqueue->upgrading_ = txn->GetTransactionId();
+    auto it = requestqueue->request_queue_.begin();
+    while (it != requestqueue->request_queue_.end()) {
+      if ((*it)->rid_ == rid && (*it)->oid_ == oid) {
+        delete *it;
+        requestqueue->request_queue_.erase(it);
+        break;
+      } else {
+        it++;
+      }
+    }
+    RemoveRowLockFromTxn(txn, current_mode, oid, rid);
+  }
 
-      
+  // part6
+  auto lockrequest = new LockRequest(txn->GetTransactionId(), lock_mode, oid, rid);
+  if (already_lock) {
+    auto insert_pos = requestqueue->request_queue_.begin();
+    while (insert_pos != requestqueue->request_queue_.end() && (*insert_pos)->granted_) {
+      insert_pos++;
+    }
+    requestqueue->request_queue_.insert(insert_pos, lockrequest);
+  } else {
+    requestqueue->request_queue_.push_back(lockrequest);
+  }
+  // part7
+  while (!Grantlock(requestqueue->request_queue_, lockrequest)) {
+    requestqueue->cv_.wait(queue_lock);
+
+    if (txn->GetState() == TransactionState::ABORTED) {
+      auto it = std::find(requestqueue->request_queue_.begin(), requestqueue->request_queue_.end(), lockrequest);
+      if (it != requestqueue->request_queue_.end()) {
+        requestqueue->request_queue_.erase(it);
+        delete lockrequest;
+      }
+      if (already_lock) {
+        requestqueue->upgrading_ = INVALID_TXN_ID;
+      }
+      requestqueue->cv_.notify_all();
+      return false;
     }
   }
+  lockrequest->granted_ = true;
+
+  // part8
+  if(already_lock){
+    requestqueue->upgrading_=INVALID_TXN_ID;
+  }
+  AddRowLockToTxn(txn,lock_mode,oid,rid);
+  requestqueue->cv_.notify_all();
 
   return true;
 }
