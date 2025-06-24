@@ -374,8 +374,9 @@ class LockManager {
     for (auto &item : lockqueue) {
       if (!item->granted_ && AreLocksCompatible(item->lock_mode_, lockrequest->lock_mode_)) {
         item->granted_ = true;
-      } else
-        (!item->granted_ && !AreLocksCompatible(item->lock_mode_, lockrequest->lock_mode_)) { break; }
+      } else if (!item->granted_ && !AreLocksCompatible(item->lock_mode_, lockrequest->lock_mode_)) {
+        break;
+      }
     }
     return true;
   }

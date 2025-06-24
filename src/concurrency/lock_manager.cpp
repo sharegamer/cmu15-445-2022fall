@@ -75,21 +75,20 @@ auto LockManager::LockTable(Transaction *txn, LockMode lock_mode, const table_oi
       return true;
     } else if (txn_lockmode == LockMode::SHARED &&
                (lock_mode != LockMode::EXCLUSIVE && lock_mode != LockMode::SHARED_INTENTION_EXCLUSIVE)) {
+      txn->SetState(TransactionState::ABORTED);
       throw TransactionAbortException(txn->GetTransactionId(), AbortReason::INCOMPATIBLE_UPGRADE);
-      return false;
+
     } else if (txn_lockmode == LockMode::INTENTION_EXCLUSIVE &&
                (lock_mode != LockMode::EXCLUSIVE && lock_mode != LockMode::SHARED_INTENTION_EXCLUSIVE)) {
       txn->SetState(TransactionState::ABORTED);
       throw TransactionAbortException(txn->GetTransactionId(), AbortReason::INCOMPATIBLE_UPGRADE);
-      return false;
+
     } else if (txn_lockmode == LockMode::SHARED_INTENTION_EXCLUSIVE && lock_mode != LockMode::EXCLUSIVE) {
       txn->SetState(TransactionState::ABORTED);
       throw TransactionAbortException(txn->GetTransactionId(), AbortReason::INCOMPATIBLE_UPGRADE);
-      return false;
     } else if (txn_lockmode == LockMode::EXCLUSIVE) {
       txn->SetState(TransactionState::ABORTED);
       throw TransactionAbortException(txn->GetTransactionId(), AbortReason::INCOMPATIBLE_UPGRADE);
-      return false;
     }
   }
 
@@ -164,7 +163,11 @@ auto LockManager::LockTable(Transaction *txn, LockMode lock_mode, const table_oi
   return true;
 }
 
-auto LockManager::UnlockTable(Transaction *txn, const table_oid_t &oid) -> bool { return true; }
+auto LockManager::UnlockTable(Transaction *txn, const table_oid_t &oid) -> bool { 
+  
+  
+  
+  return true; }
 
 auto LockManager::LockRow(Transaction *txn, LockMode lock_mode, const table_oid_t &oid, const RID &rid) -> bool {
   // part1
@@ -238,6 +241,7 @@ auto LockManager::LockRow(Transaction *txn, LockMode lock_mode, const table_oid_
     if (current_mode == lock_mode) {
       return true;
     } else if (current_mode == LockMode::SHARED && (lock_mode != LockMode::EXCLUSIVE)) {
+      txn->SetState(TransactionState::ABORTED);
       throw TransactionAbortException(txn->GetTransactionId(), AbortReason::INCOMPATIBLE_UPGRADE);
       return false;
     } else if (current_mode == LockMode::EXCLUSIVE) {
@@ -264,7 +268,7 @@ auto LockManager::LockRow(Transaction *txn, LockMode lock_mode, const table_oid_
     requestqueue->upgrading_ = txn->GetTransactionId();
     auto it = requestqueue->request_queue_.begin();
     while (it != requestqueue->request_queue_.end()) {
-      if ((*it)->rid_ == rid && (*it)->oid_ == oid) {
+      if ((*it)->txn_id_==txn->GetTransactionId()) {
         delete *it;
         requestqueue->request_queue_.erase(it);
         break;
@@ -306,10 +310,10 @@ auto LockManager::LockRow(Transaction *txn, LockMode lock_mode, const table_oid_
   lockrequest->granted_ = true;
 
   // part8
-  if(already_lock){
-    requestqueue->upgrading_=INVALID_TXN_ID;
+  if (already_lock) {
+    requestqueue->upgrading_ = INVALID_TXN_ID;
   }
-  AddRowLockToTxn(txn,lock_mode,oid,rid);
+  AddRowLockToTxn(txn, lock_mode, oid, rid);
   requestqueue->cv_.notify_all();
 
   return true;
