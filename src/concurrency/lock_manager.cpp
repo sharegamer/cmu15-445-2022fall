@@ -173,13 +173,12 @@ auto LockManager::UnlockTable(Transaction *txn, const table_oid_t &oid) -> bool 
 
   std::unique_lock<std::mutex> queuelock(lockqueue->latch_);
   bool find = false;
-  LockRequest *target;
   LockMode lockmode;
   for (auto &lockrequest : lockqueue->request_queue_) {
     if (lockrequest->txn_id_ == txn->GetTransactionId() && lockrequest->granted_) {
       find = true;
-      target = lockrequest;
       lockmode = lockrequest->lock_mode_;
+      break;
     }
   }
   if (!find) {
@@ -202,19 +201,21 @@ auto LockManager::UnlockTable(Transaction *txn, const table_oid_t &oid) -> bool 
     if ((*it)->txn_id_ == txn->GetTransactionId()) {
       delete *it;
       lockqueue->request_queue_.erase(it);
+      break;
+    } else {
+      it++;
     }
   }
   if (lockmode == LockMode::SHARED) {
-    if (txn->GetIsolationLevel() == IsolationLevel::REPEATABLE_READ) {
+    if (txn->GetIsolationLevel() == IsolationLevel::REPEATABLE_READ && txn->GetState() != TransactionState::COMMITTED &&
+        txn->GetState() != TransactionState::ABORTED) {
       txn->SetState(TransactionState::SHRINKING);
-      txn->GetSharedTableLockSet()->erase(oid);
     }
-  }
-  else if (lockmode == LockMode::EXCLUSIVE) {
+  } else if (lockmode == LockMode::EXCLUSIVE && txn->GetState() != TransactionState::COMMITTED &&
+             txn->GetState() != TransactionState::ABORTED) {
     txn->SetState(TransactionState::SHRINKING);
-    txn->GetExclusiveTableLockSet()->erase(oid);
   }
-
+  RemoveTableLockFromTxn(txn, lockmode, oid);
   lockqueue->cv_.notify_all();
   return true;
 }
@@ -269,6 +270,9 @@ auto LockManager::LockRow(Transaction *txn, LockMode lock_mode, const table_oid_
       has_required_table_lock = txn->IsTableIntentionExclusiveLocked(oid) ||
                                 txn->IsTableSharedIntentionExclusiveLocked(oid) || txn->IsTableExclusiveLocked(oid);
       break;
+    default:
+      txn->SetState(TransactionState::ABORTED);
+      throw TransactionAbortException(txn->GetTransactionId(), AbortReason::ATTEMPTED_INTENTION_LOCK_ON_ROW);
   }
 
   if (!has_required_table_lock) {
@@ -369,7 +373,52 @@ auto LockManager::LockRow(Transaction *txn, LockMode lock_mode, const table_oid_
   return true;
 }
 
-auto LockManager::UnlockRow(Transaction *txn, const table_oid_t &oid, const RID &rid) -> bool { return true; }
+auto LockManager::UnlockRow(Transaction *txn, const table_oid_t &oid, const RID &rid) -> bool {
+  std::unique_lock<std::mutex> row_map_lock(row_lock_map_latch_);
+  if (row_lock_map_.find(rid) == row_lock_map_.end()) {
+    row_lock_map_[rid] = std::make_shared<LockRequestQueue>();
+  }
+  auto lockqueue = row_lock_map_[rid];
+  row_map_lock.unlock();
+
+  std::unique_lock<std::mutex> queuelock(lockqueue->latch_);
+  bool find = false;
+  LockMode lockmode;
+  for (auto &lockrequest : lockqueue->request_queue_) {
+    if (lockrequest->txn_id_ == txn->GetTransactionId() && lockrequest->granted_ && lockrequest->oid_ == oid) {
+      find = true;
+      lockmode = lockrequest->lock_mode_;
+      break;
+    }
+  }
+  if (!find) {
+    txn->SetState(TransactionState::ABORTED);
+    throw TransactionAbortException(txn->GetTransactionId(), AbortReason::ATTEMPTED_UNLOCK_BUT_NO_LOCK_HELD);
+  }
+
+  auto it = lockqueue->request_queue_.begin();
+  while (it != lockqueue->request_queue_.end()) {
+    if ((*it)->txn_id_ == txn->GetTransactionId() && (*it)->oid_ == oid) {
+      delete *it;
+      lockqueue->request_queue_.erase(it);
+      break;
+    } else {
+      it++;
+    }
+  }
+  if (lockmode == LockMode::SHARED) {
+    if (txn->GetIsolationLevel() == IsolationLevel::REPEATABLE_READ && txn->GetState() != TransactionState::COMMITTED &&
+        txn->GetState() != TransactionState::ABORTED) {
+      txn->SetState(TransactionState::SHRINKING);
+    }
+  } else if (lockmode == LockMode::EXCLUSIVE && txn->GetState() != TransactionState::COMMITTED &&
+             txn->GetState() != TransactionState::ABORTED) {
+    txn->SetState(TransactionState::SHRINKING);
+  }
+  RemoveRowLockFromTxn(txn, lockmode, oid, rid);
+  lockqueue->cv_.notify_all();
+  return true;
+}
 
 void LockManager::AddEdge(txn_id_t t1, txn_id_t t2) {}
 
