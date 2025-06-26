@@ -420,7 +420,12 @@ auto LockManager::UnlockRow(Transaction *txn, const table_oid_t &oid, const RID 
   return true;
 }
 
-void LockManager::AddEdge(txn_id_t t1, txn_id_t t2) {}
+void LockManager::AddEdge(txn_id_t t1, txn_id_t t2) {
+  std::unique_lock<std::mutex> waits_for_lock(waits_for_latch_);
+  if(waits_for_[t1].)
+  waits_for_[t1].emplace_back(t2);
+
+}
 
 void LockManager::RemoveEdge(txn_id_t t1, txn_id_t t2) {}
 
