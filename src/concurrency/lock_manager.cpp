@@ -421,15 +421,59 @@ auto LockManager::UnlockRow(Transaction *txn, const table_oid_t &oid, const RID 
 }
 
 void LockManager::AddEdge(txn_id_t t1, txn_id_t t2) {
-  std::unique_lock<std::mutex> waits_for_lock(waits_for_latch_);
-  if(waits_for_[t1].)
-  waits_for_[t1].emplace_back(t2);
+  bool find = false;
+  for (auto &item : waits_for_[t1]) {
+    if (item == t2) {
+      find = true
+    }
+  }
+  if (!find) {
+    waits_for_[t1].emplace_back(t2);
+  }
+}
+
+void LockManager::RemoveEdge(txn_id_t t1, txn_id_t t2) {
+  auto it=waits_for_[t1].begin();
+  bool find=false;
+  while (it!=waits_for_[t1].end())
+  {
+    if(*it==t2){
+      find=true;
+      break;
+    }
+    it++;
+  }
+  if(find){
+    waits_for_[t1].erase(it);
+  }
 
 }
 
-void LockManager::RemoveEdge(txn_id_t t1, txn_id_t t2) {}
+auto LockManager::HasCycle(txn_id_t *txn_id) -> bool { 
+  
+  std::unordered_set<txn_id_t> visisted;
+  std::vector<txn_id_t> path;
+  std::vector<txn_id_t> cycle;
+  std::set<txn_id_t> sorted_id;
 
-auto LockManager::HasCycle(txn_id_t *txn_id) -> bool { return false; }
+  for(auto &item:waits_for_){
+    sorted_id.insert(item.first);
+  }
+
+  for(auto &item:sorted_id){
+    if(visisted.find(item)==visisted.end()){
+      if(DFS(item,visisted,path,cycle)){
+        auto max_id=std::max_element(cycle.begin(), cycle.end());
+        *txn_id=*max_id;
+        return true;
+      }
+    }
+
+  }
+
+  
+  
+  return false; }
 
 auto LockManager::GetEdgeList() -> std::vector<std::pair<txn_id_t, txn_id_t>> {
   std::vector<std::pair<txn_id_t, txn_id_t>> edges(0);
@@ -440,6 +484,10 @@ void LockManager::RunCycleDetection() {
   while (enable_cycle_detection_) {
     std::this_thread::sleep_for(cycle_detection_interval);
     {  // TODO(students): detect deadlock
+      std::unique_lock<std::mutex> waits_for_lock(waits_for_latch_);
+
+
+
     }
   }
 }
