@@ -53,5 +53,6 @@ class SeqScanExecutor : public AbstractExecutor {
   TableInfo *table_info_;
   TableIterator table_iterator_;
   TableIterator end_iterator_;
+  std::optional<RID> last_rid_;
 };
 }  // namespace bustub

@@ -1,4 +1,4 @@
-## complete three projects(all full scores). waiting for four project to complete.
+## complete all projects(all full scores). 
 
 
 <img src="logo/bustub-whiteborder.svg" alt="BusTub Logo" height="200">
