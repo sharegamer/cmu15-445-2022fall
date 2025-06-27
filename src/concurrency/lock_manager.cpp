@@ -424,7 +424,7 @@ void LockManager::AddEdge(txn_id_t t1, txn_id_t t2) {
   bool find = false;
   for (auto &item : waits_for_[t1]) {
     if (item == t2) {
-      find = true
+      find = true;
     }
   }
   if (!find) {
@@ -433,50 +433,47 @@ void LockManager::AddEdge(txn_id_t t1, txn_id_t t2) {
 }
 
 void LockManager::RemoveEdge(txn_id_t t1, txn_id_t t2) {
-  auto it=waits_for_[t1].begin();
-  bool find=false;
-  while (it!=waits_for_[t1].end())
-  {
-    if(*it==t2){
-      find=true;
+  auto it = waits_for_[t1].begin();
+  bool find = false;
+  while (it != waits_for_[t1].end()) {
+    if (*it == t2) {
+      find = true;
       break;
     }
     it++;
   }
-  if(find){
+  if (find) {
     waits_for_[t1].erase(it);
   }
-
 }
 
-auto LockManager::HasCycle(txn_id_t *txn_id) -> bool { 
-  
+auto LockManager::HasCycle(txn_id_t *txn_id) -> bool {
   std::unordered_set<txn_id_t> visisted;
   std::vector<txn_id_t> path;
-  std::vector<txn_id_t> cycle;
   std::set<txn_id_t> sorted_id;
-
-  for(auto &item:waits_for_){
+  *txn_id = -1;
+  for (auto &item : waits_for_) {
     sorted_id.insert(item.first);
   }
 
-  for(auto &item:sorted_id){
-    if(visisted.find(item)==visisted.end()){
-      if(DFS(item,visisted,path,cycle)){
-        auto max_id=std::max_element(cycle.begin(), cycle.end());
-        *txn_id=*max_id;
+  for (auto &item : sorted_id) {
+    if (visisted.find(item) == visisted.end()) {
+      if (DFS(item, visisted, path, txn_id)) {
         return true;
       }
     }
-
   }
 
-  
-  
-  return false; }
+  return false;
+}
 
 auto LockManager::GetEdgeList() -> std::vector<std::pair<txn_id_t, txn_id_t>> {
   std::vector<std::pair<txn_id_t, txn_id_t>> edges(0);
+  for (auto item : waits_for_) {
+    for (auto it : item.second) {
+      edges.emplace_back(item.first, it);
+    }
+  }
   return edges;
 }
 
@@ -485,9 +482,68 @@ void LockManager::RunCycleDetection() {
     std::this_thread::sleep_for(cycle_detection_interval);
     {  // TODO(students): detect deadlock
       std::unique_lock<std::mutex> waits_for_lock(waits_for_latch_);
+      waits_for_.clear();
+      std::unique_lock<std::mutex> table_lock_(table_lock_map_latch_);
+      std::unordered_map<table_oid_t, std::unordered_set<txn_id_t>> granted_table;
+      std::unordered_map<table_oid_t, std::unordered_set<txn_id_t>> ungranted_table;
+      for (auto item : table_lock_map_) {
+        auto lockqueue = item.second;
+        for (auto request : lockqueue->request_queue_) {
+          if (TransactionManager::GetTransaction(request->txn_id_)->GetState() != TransactionState::ABORTED) {
+            if (request->granted_) {
+              granted_table[request->oid_].insert(request->txn_id_);
+            } else {
+              ungranted_table[request->oid_].insert(request->txn_id_);
+            }
+          }
+        }
+      }
+      for (auto item : ungranted_table) {
+        for (auto unid : item.second) {
+          for (auto grantid : granted_table[item.first]) {
+            AddEdge(unid, grantid);
+          }
+        }
+      }
+      std::unique_lock<std::mutex> row_lock_(row_lock_map_latch_);
+      std::unordered_map<RID, std::unordered_set<txn_id_t>> granted_row;
+      std::unordered_map<RID, std::unordered_set<txn_id_t>> ungranted_row;
+      for (auto item : row_lock_map_) {
+        auto lockqueue = item.second;
+        for (auto request : lockqueue->request_queue_) {
+          if (TransactionManager::GetTransaction(request->txn_id_)->GetState() != TransactionState::ABORTED) {
+            if (request->granted_) {
+              granted_row[request->rid_].insert(request->txn_id_);
+            } else {
+              ungranted_row[request->rid_].insert(request->txn_id_);
+            }
+          }
+        }
+      }
+      for (auto item : ungranted_row) {
+        for (auto unid : item.second) {
+          for (auto grantid : granted_row[item.first]) {
+            AddEdge(unid, grantid);
+          }
+        }
+      }
 
-
-
+      txn_id_t remove_id;
+      while (HasCycle(&remove_id)) {
+        auto remove_txn = TransactionManager::GetTransaction(remove_id);
+        remove_txn->SetState(TransactionState::ABORTED);
+        waits_for_.erase(remove_id);
+        for (auto &[txn_id, neighbors] : waits_for_) {
+          neighbors.erase(std::remove(neighbors.begin(), neighbors.end(), remove_id), 
+                         neighbors.end());
+        }
+        for (auto &[oid, lock_queue] : table_lock_map_) {
+          lock_queue->cv_.notify_all();
+        }
+        for (auto &[rid, lock_queue] : row_lock_map_) {
+          lock_queue->cv_.notify_all();
+        }
+      }
     }
   }
 }
