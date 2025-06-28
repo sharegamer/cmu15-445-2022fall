@@ -389,9 +389,8 @@ class LockManager {
         break;
       }
 
-      if (item->granted_ && !AreLocksCompatible(item->lock_mode_, lockrequest->lock_mode_)) {
-        return false;
-      } else if (!item->granted_ && !AreLocksCompatible(item->lock_mode_, lockrequest->lock_mode_)) {
+      if ((item->granted_ && !AreLocksCompatible(item->lock_mode_, lockrequest->lock_mode_)) ||
+          (!item->granted_ && !AreLocksCompatible(item->lock_mode_, lockrequest->lock_mode_))) {
         return false;
       }
     }
@@ -407,7 +406,6 @@ class LockManager {
   }
 
   auto AreLocksCompatible(LockMode first, LockMode second) -> bool {
-    // 基于标准的锁兼容性矩阵
     if (first == LockMode::INTENTION_SHARED) {
       return second != LockMode::EXCLUSIVE;
     }

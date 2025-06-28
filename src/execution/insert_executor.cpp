@@ -23,16 +23,15 @@ InsertExecutor::InsertExecutor(ExecutorContext *exec_ctx, const InsertPlanNode *
 void InsertExecutor::Init() {
   // Initialize the child executor
   child_executor_->Init();
-  
+
   // Acquire intention exclusive lock on the table
   auto txn = exec_ctx_->GetTransaction();
   auto lock_manager = exec_ctx_->GetLockManager();
   auto table_oid = plan_->TableOid();
-  
+
   try {
     // Check if we already have a sufficient lock on the table
-    if (!txn->IsTableExclusiveLocked(table_oid) && 
-        !txn->IsTableIntentionExclusiveLocked(table_oid) &&
+    if (!txn->IsTableExclusiveLocked(table_oid) && !txn->IsTableIntentionExclusiveLocked(table_oid) &&
         !txn->IsTableSharedIntentionExclusiveLocked(table_oid)) {
       // Acquire IX lock on the table for row-level locking
       if (!lock_manager->LockTable(txn, LockManager::LockMode::INTENTION_EXCLUSIVE, table_oid)) {
@@ -49,15 +48,15 @@ auto InsertExecutor::Next([[maybe_unused]] Tuple *tuple, RID *rid) -> bool {
     return false;
   }
   insert_ = true;
-  
+
   auto txn = exec_ctx_->GetTransaction();
   auto lock_manager = exec_ctx_->GetLockManager();
-  
+
   Tuple child_tuple{};
   TableInfo *table_info = exec_ctx_->GetCatalog()->GetTable(plan_->TableOid());
   std::vector<IndexInfo *> indexes = exec_ctx_->GetCatalog()->GetTableIndexes(table_info->name_);
   int insert_count = 0;
-  
+
   // Get the next tuple
   while (child_executor_->Next(&child_tuple, rid)) {
     // Insert the tuple into the table
@@ -65,7 +64,7 @@ auto InsertExecutor::Next([[maybe_unused]] Tuple *tuple, RID *rid) -> bool {
     if (!suc) {
       return false;
     }
-    
+
     // After successful insertion, acquire exclusive lock on the new row
     try {
       // For inserts, we need exclusive lock on the new row
@@ -77,17 +76,17 @@ auto InsertExecutor::Next([[maybe_unused]] Tuple *tuple, RID *rid) -> bool {
     } catch (TransactionAbortException &e) {
       throw ExecutionException("Transaction aborted during row lock acquisition for insert");
     }
-    
+
     // Update all indexes
     for (const auto index : indexes) {
       Tuple key_tuple = child_tuple.KeyFromTuple(child_executor_->GetOutputSchema(), index->key_schema_,
                                                  index->index_->GetKeyAttrs());
       index->index_->InsertEntry(key_tuple, *rid, exec_ctx_->GetTransaction());
     }
-    
+
     insert_count++;
   }
-  
+
   // Return the number of inserted tuples
   std::vector<Value> result{Value(INTEGER, insert_count)};
   *tuple = Tuple(result, &plan_->OutputSchema());
